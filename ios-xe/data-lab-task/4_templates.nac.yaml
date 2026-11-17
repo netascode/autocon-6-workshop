@@ -1,0 +1,10 @@
+---
+iosxe:
+  templates:
+    - name: vlan
+      type: model
+      configuration:
+        vlan:
+          vlans:
+            - id: ${VLAN_ID}
+              name: ${VLAN_NAME}

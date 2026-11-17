@@ -1,0 +1,30 @@
+# Terraform
+.terraform.lock.hcl
+.terraform/
+*.tfstate
+*.tfstate.*
+plan.tfplan
+
+# Local secrets - only the template is tracked
+.env
+*.env
+!.env.example
+
+# Rendered models and test output
+meraki/model.yaml
+ios-xe/model.yaml
+meraki/tests/results/
+ios-xe/tests/results/
+
+# nac-test / pabot and Meraki API caches
+meraki/.pabotsuitenames
+ios-xe/.pabotsuitenames
+meraki/cache.json
+meraki/cache.json.lock
+meraki/meraki_api_throttle.lock
+
+# Python
+__pycache__/
+.venv/
+meraki/.python-version
+ios-xe/.python-version

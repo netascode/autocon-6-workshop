@@ -1,0 +1,13 @@
+
+meraki:
+  domains:
+    - name: US
+      organizations:
+        - name: !env org_name
+          networks:
+            - name: !env branch_name
+              templates:
+                - app_fw
+                - app_content
+                - app_intrusion
+                - app_mal

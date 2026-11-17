@@ -1,0 +1,137 @@
+# .gitlab-ci.yml - autocon-2026
+#
+# Runs the same nac loop as the lab steps (nac init / validate / plan /
+# apply / test) for the Meraki project in meraki/.
+#
+# Required CI/CD variables (Settings > CI/CD > Variables) - pod-specific
+# and/or secret, so they stay out of this file:
+#   MERAKI_API_KEY   (masked - the one real secret)
+#   org_name         (your Meraki organization name)
+#   branch_name      (your pod's unique network name)
+#   branch_mx_serial (your pod's MX appliance serial)
+#   branch_ms_serial (your pod's MS switch serial)
+#   branch_cw_serial (your pod's CW access point serial)
+#
+# State: GitLab-managed Terraform state via the `http` backend, which
+# attendees add to meraki/main.tf in step 7. The TF_HTTP_* variables below
+# configure it. There is one state per project, so merge request plans
+# compare against what the default branch deployed.
+#
+# Jobs:
+#   validate - every pipeline
+#   plan     - merge requests and the default branch
+#   deploy   - default branch only, applies the plan from the plan job
+#   test     - default branch only, after deploy
+
+image: danischm/autocon-lab:latest
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+stages:
+  - validate
+  - plan
+  - deploy
+  - test
+
+variables:
+  # Disable interactive Terraform prompts
+  TF_INPUT: "0"
+  TF_IN_AUTOMATION: "true"
+  # The lab GitLab instance uses a self-signed certificate
+  GIT_SSL_NO_VERIFY: "true"
+  # Retry Meraki API calls that return a temporary 404
+  MERAKI_RETRY_ON_ERROR_CODES: "404"
+  # Retry up to 5 times
+  MERAKI_RETRIES: "5"
+  # Terraform state, stored in this GitLab project
+  TF_HTTP_ADDRESS: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/meraki"
+  TF_HTTP_LOCK_ADDRESS: "${TF_HTTP_ADDRESS}/lock"
+  TF_HTTP_LOCK_METHOD: "POST"
+  TF_HTTP_UNLOCK_ADDRESS: "${TF_HTTP_ADDRESS}/lock"
+  TF_HTTP_UNLOCK_METHOD: "DELETE"
+  TF_HTTP_USERNAME: "gitlab-ci-token"
+  TF_HTTP_PASSWORD: "${CI_JOB_TOKEN}"
+  # Lab-only example credentials from .env.example (not real secrets)
+  org_admin: "admin"
+  org_admin_email: "admin-branch@netascode.cisco.com"
+  v3_auth_pass: "Cisco12345"
+  v3_priv_pass: "Cisco12345"
+  local_status_page_username: "admin"
+  local_page_username: "admin"
+  local_status_page_password: "Cisco!12345C60972A"
+  local_page_password: "Cisco!12345C60972A"
+  radius_accounting_server_secret: "Cisco12345!"
+  radius_server_secret: "Cisco12345!"
+  snmp_username: "admin"
+  snmp_passphrase: "Cisco!12345C60972A"
+
+default:
+  before_script:
+    - cd meraki
+
+.default_branch_only: &default_branch_only
+  - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+validate:
+  stage: validate
+  script:
+    - nac init
+    - nac validate --artifacts
+  artifacts:
+    when: always
+    paths:
+      - meraki/validate.txt
+
+plan:
+  stage: plan
+  resource_group: meraki
+  needs: ["validate"]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  script:
+    - nac init
+    - nac plan --artifacts
+    # Summary for the merge request's Terraform widget
+    - jq '([.resource_changes[]?.change.actions?]|flatten)|{"create":(map(select(.=="create"))|length),"update":(map(select(.=="update"))|length),"delete":(map(select(.=="delete"))|length)}' plan.json > plan_gitlab.json
+  artifacts:
+    paths:
+      - meraki/plan.tfplan
+      - meraki/plan.txt
+      - meraki/plan.json
+      - meraki/plan_gitlab.json
+    reports:
+      terraform: meraki/plan_gitlab.json
+
+deploy:
+  stage: deploy
+  resource_group: meraki
+  needs: ["plan"]
+  rules: *default_branch_only
+  script:
+    - nac init
+    # Applies plan.tfplan from the plan job
+    - nac apply
+
+test:
+  stage: test
+  resource_group: meraki
+  needs: ["deploy"]
+  rules: *default_branch_only
+  script:
+    - nac init
+    - nac test --artifacts
+  artifacts:
+    when: always
+    paths:
+      - meraki/test.txt
+      - meraki/tests/results/*.html
+      - meraki/tests/results/robot_results/*.html
+      - meraki/tests/results/xunit.xml
+    reports:
+      junit: meraki/tests/results/xunit.xml

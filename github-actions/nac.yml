@@ -1,0 +1,242 @@
+# GitHub Actions equivalent of .gitlab-ci.yml - provided as a reference only,
+# the lab itself uses the GitLab pipeline.
+#
+# Runs the same nac loop (nac init / validate / plan / apply / test) for the
+# Meraki project in meraki/, with the same jobs, rules, and container image
+# as the GitLab pipeline. To use it, copy it to .github/workflows/ in your
+# own GitHub repository.
+#
+# Where GitHub differs from GitLab:
+#   - Terraform state: GitHub doesn't store Terraform state, so this workflow
+#     keeps it in an S3 bucket, with S3's native state locking. Each job
+#     writes a backend_override.tf that replaces the backend "http" block from
+#     step 7, so meraki/main.tf stays the same for both pipelines. To use
+#     another backend, change that step - see the options at
+#     https://developer.hashicorp.com/terraform/language/backend
+#     (S3 settings: https://developer.hashicorp.com/terraform/language/backend/s3).
+#   - Merge request widget and Tests tab: the plan summary and the test
+#     results are shown in each run's summary instead.
+#   - resource_group: replaced by the concurrency group "meraki". Like
+#     GitLab, it runs one job at a time, but GitHub keeps only the newest
+#     waiting job and cancels older waiting ones.
+#
+# Required settings (Settings > Secrets and variables > Actions):
+#   Secrets:   MERAKI_API_KEY          (your Meraki Dashboard API key)
+#              AWS_ACCESS_KEY_ID       (access to the state bucket)
+#              AWS_SECRET_ACCESS_KEY
+#   Variables: ORG_NAME                (your Meraki organization name)
+#              BRANCH_NAME             (your pod's unique network name)
+#              BRANCH_MX_SERIAL        (your pod's MX appliance serial)
+#              BRANCH_MS_SERIAL        (your pod's MS switch serial)
+#              BRANCH_CW_SERIAL        (your pod's CW access point serial)
+#              TF_STATE_BUCKET         (S3 bucket for the Terraform state)
+#              AWS_REGION              (the bucket's region)
+#
+# Jobs:
+#   validate - every pipeline
+#   plan     - pull requests and the default branch
+#   deploy   - default branch only, applies the plan from the plan job
+#   test     - default branch only, after deploy
+
+name: nac
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # Disable interactive Terraform prompts
+  TF_INPUT: "0"
+  TF_IN_AUTOMATION: "true"
+  # Retry Meraki API calls that return a temporary 404
+  MERAKI_RETRY_ON_ERROR_CODES: "404"
+  # Retry up to 5 times
+  MERAKI_RETRIES: "5"
+  # Pod-specific values and the one real secret
+  MERAKI_API_KEY: ${{ secrets.MERAKI_API_KEY }}
+  org_name: ${{ vars.ORG_NAME }}
+  branch_name: ${{ vars.BRANCH_NAME }}
+  branch_mx_serial: ${{ vars.BRANCH_MX_SERIAL }}
+  branch_ms_serial: ${{ vars.BRANCH_MS_SERIAL }}
+  branch_cw_serial: ${{ vars.BRANCH_CW_SERIAL }}
+  # Terraform state, stored in S3
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  # Lab-only example credentials from .env.example (not real secrets)
+  org_admin: "admin"
+  org_admin_email: "admin-branch@netascode.cisco.com"
+  v3_auth_pass: "Cisco12345"
+  v3_priv_pass: "Cisco12345"
+  local_status_page_username: "admin"
+  local_page_username: "admin"
+  local_status_page_password: "Cisco!12345C60972A"
+  local_page_password: "Cisco!12345C60972A"
+  radius_accounting_server_secret: "Cisco12345!"
+  radius_server_secret: "Cisco12345!"
+  snmp_username: "admin"
+  snmp_passphrase: "Cisco!12345C60972A"
+
+defaults:
+  run:
+    working-directory: meraki
+
+jobs:
+  # GitLab's workflow rules: a push to a branch with an open merge request
+  # runs only the merge request pipeline, not a second branch pipeline.
+  rules:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run=true
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            open=$(gh pr list -R "$GITHUB_REPOSITORY" --head "$GITHUB_REF_NAME" --state open --json number --jq length)
+            if [ "$open" -gt 0 ]; then run=false; fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+  validate:
+    needs: rules
+    if: needs.rules.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    container: danischm/autocon-lab:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Like a GitLab merge request pipeline: the branch's own commit
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Store the Terraform state in S3
+        run: &backend |
+          cat > backend_override.tf <<EOF
+          terraform {
+            backend "s3" {
+              bucket       = "$TF_STATE_BUCKET"
+              key          = "meraki/terraform.tfstate"
+              region       = "$AWS_REGION"
+              use_lockfile = true
+            }
+          }
+          EOF
+      - run: nac init
+      - run: nac validate --artifacts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: validate
+          path: meraki/validate.txt
+
+  plan:
+    needs: [rules, validate]
+    if: >-
+      needs.rules.outputs.run == 'true' &&
+      (github.event_name == 'pull_request' ||
+       github.ref_name == github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    container: danischm/autocon-lab:latest
+    concurrency:
+      group: meraki
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Store the Terraform state in S3
+        run: *backend
+      - run: nac init
+      - run: nac plan --artifacts
+      # Summary for the pull request, like the merge request's Terraform widget
+      - name: Plan summary
+        run: |
+          jq '([.resource_changes[]?.change.actions?]|flatten)|{"create":(map(select(.=="create"))|length),"update":(map(select(.=="update"))|length),"delete":(map(select(.=="delete"))|length)}' plan.json > plan_summary.json
+          {
+            echo "### Terraform plan"
+            echo
+            jq -r '"\(.create) to add, \(.update) to change, \(.delete) to destroy"' plan_summary.json
+            echo
+            echo "<details><summary>Full plan</summary>"
+            echo
+            echo '```'
+            cat plan.txt
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan
+          path: |
+            meraki/plan.tfplan
+            meraki/plan.txt
+            meraki/plan.json
+            meraki/plan_summary.json
+
+  deploy:
+    needs: [rules, plan]
+    if: >-
+      needs.rules.outputs.run == 'true' &&
+      github.event_name == 'push' &&
+      github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    container: danischm/autocon-lab:latest
+    concurrency:
+      group: meraki
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Store the Terraform state in S3
+        run: *backend
+      - uses: actions/download-artifact@v4
+        with:
+          name: plan
+          path: meraki
+      - run: nac init
+      # Applies plan.tfplan from the plan job
+      - run: nac apply
+
+  test:
+    needs: [rules, deploy]
+    if: >-
+      needs.rules.outputs.run == 'true' &&
+      github.event_name == 'push' &&
+      github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    container: danischm/autocon-lab:latest
+    concurrency:
+      group: meraki
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Store the Terraform state in S3
+        run: *backend
+      - run: nac init
+      - run: nac test --artifacts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test
+          path: |
+            meraki/test.txt
+            meraki/tests/results/*.html
+            meraki/tests/results/robot_results/*.html
+            meraki/tests/results/xunit.xml
+      # Test results in the run summary, like GitLab's Tests tab
+      - uses: mikepenz/action-junit-report@v5
+        if: always()
+        with:
+          report_paths: meraki/tests/results/xunit.xml
+          detailed_summary: true
