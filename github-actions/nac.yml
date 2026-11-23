@@ -71,16 +71,16 @@ env:
   # Lab-only example credentials from .env.example (not real secrets)
   org_admin: "admin"
   org_admin_email: "admin-branch@netascode.cisco.com"
-  v3_auth_pass: "Cisco12345"
-  v3_priv_pass: "Cisco12345"
+  v3_auth_pass: "CHANGE_ME_AUTH"
+  v3_priv_pass: "CHANGE_ME_AUTH"
   local_status_page_username: "admin"
   local_page_username: "admin"
-  local_status_page_password: "Cisco!12345C60972A"
-  local_page_password: "Cisco!12345C60972A"
-  radius_accounting_server_secret: "Cisco12345!"
-  radius_server_secret: "Cisco12345!"
+  local_status_page_password: "CHANGE_ME_AUTH"
+  local_page_password: "CHANGE_ME_AUTH"
+  radius_accounting_server_secret: "CHANGE_ME_AUTH"
+  radius_server_secret: "CHANGE_ME_AUTH"
   snmp_username: "admin"
-  snmp_passphrase: "Cisco!12345C60972A"
+  snmp_passphrase: "CHANGE_ME_AUTH"
 
 defaults:
   run:
